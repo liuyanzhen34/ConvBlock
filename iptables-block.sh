@@ -193,6 +193,68 @@ podCidr=196.166.0.0/16
 workDir=$(pwd)
 
 #########################################
+# 用于封堵panji名称空间端口用到的变量       #
+#########################################
+
+# 全局变量：存储暴露的端口数组
+pj_port=()
+
+# 预先定义需要查询的命名空间,如果磐基名称空间有变化，可以手动修改维护这个名称空间数组
+namespaces=("chaosblade" "default" "istio-system" "kube-node-lease" "kube-public" "kube-system" "monitor-ns" "nfs-provisioner-ns" "paas-admin" "paas-ec" "paas-middleware" "paas-monitor" "paas-public")
+
+# 输出文件路径
+output_file="pj-port-svc-mapper.txt"
+
+# 定义布尔变量，初始值为假,如果传入的参数指明只封堵磐基名称空间的端口，这个变量就为true
+Block_only_panji=false
+
+# 查找指定命名空间中暴露在宿主机的端口及对应服务关系
+# 结果会赋值给全局变量 pj_port
+find_exposed_host_ports_with_mapping() {
+    local ports=()
+
+    # 清空历史文件
+    > "$output_file"
+
+    # 遍历所有命名空间
+    for ns in "${namespaces[@]}"; do
+        echo "正在处理命名空间: $ns"
+        
+        # 1. 处理NodePort类型的Service（记录Service名称和端口映射）
+        local node_port_data
+        node_port_data=$(kubectl get svc -n "$ns" -o jsonpath='{range .items[?(@.spec.type=="NodePort")]}{.metadata.name}{"|"}{.spec.ports[*].nodePort}{"|"}{.spec.ports[*].name}{"\n"}{end}')
+        while IFS="|" read -r svc_name node_port port_name; do
+            if [ -n "$node_port" ] && [ -n "$svc_name" ]; then
+                ports+=("$node_port")
+                echo "NodePort|$node_port|svc/$ns/$svc_name:$port_name" >> "$output_file"
+            fi
+        done <<< "$node_port_data"
+
+        # 2. 处理Pod中的hostPort（记录容器名称）
+        local host_port_data
+        host_port_data=$(kubectl get pods -n "$ns" -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{range .spec.containers[*]}{.name}{"|"}{.ports[?(@.hostPort)].hostPort}{"|"}{.ports[?(@.hostPort)].containerPort}{"\n"}{end}{end}')
+        while IFS="|" read -r pod_name container_name host_port container_port; do
+            if [ -n "$host_port" ] && [ -n "$container_name" ]; then
+                ports+=("$host_port")
+                echo "HostPort|$host_port|pod/$ns/$container_name:$container_port" >> "$output_file"
+            fi
+        done <<< "$host_port_data"
+
+        # 3. 处理hostNetwork=true的Pod（使用容器端口作为暴露端口）
+        local host_network_data
+        host_network_data=$(kubectl get pods -n "$ns" -o jsonpath='{range .items[?(@.spec.hostNetwork==true)]}{.metadata.name}{"|"}{range .spec.containers[*]}{.name}{"|"}{.ports[*].containerPort}{"\n"}{end}{end}')
+        while IFS="|" read -r pod_name container_name container_port; do
+            if [ -n "$container_port" ] && [ -n "$container_name" ]; then
+                ports+=("$container_port")
+                echo "HostNetwork|$container_port|hostNetwork/$ns/$container_name:$container_port" >> "$output_file"
+            fi
+        done <<< "$host_network_data"
+    done
+
+    # 对端口去重并排序，赋值给全局变量
+    pj_port=($(printf "%s\n" "${ports[@]}" | sort -n | uniq))
+}
+#########################################
 # Common Routines / Functions area      #
 #########################################
 
@@ -400,6 +462,10 @@ run_host_caps() {
    done
    filter=$filter' )'
 
+
+   
+# 判断变量值
+if [ "$Block_only_panji" = false ]; then
    # Obtaining possible listening addresses, such as listening at 0.0.0.0 and :::, means receiving incoming connections from any local network interface, and also includes the IP address bound by a valid network adapters.
    local effLsnIps=`echo ${arrIpLocal[@]} | sed 's/ /|/g'`'|0.0.0.0|:::'
 
@@ -418,9 +484,16 @@ run_host_caps() {
 
    # Convert ports list to port ranges list
    local allPortRanges=(`ports_range "${allPorts[@]}"`)
-
    # Assemble the listening port ranges filter
    local rangeFilter=$(echo ${allPortRanges[@]} | sed 's/ /\n/g' | sed 's/^/or dst portrange /g' | tr '\n' ' ' | sed 's/^or//')
+else
+   local allPorts=(`echo ${pj_port[@]} | sed 's/ /\n/g' | sort -u -n`)
+   # Convert panji ports list to port ranges list
+   local pj_allPortRanges=(`ports_range "${allPorts[@]}"`)
+   # Assemble the listening port ranges filter
+   local rangeFilter=$(echo ${pj_allPortRanges[@]} | sed 's/ /\n/g' | sed 's/^/or dst portrange /g' | tr '\n' ' ' | sed 's/^or//')
+    
+fi
    rangeFilter="($rangeFilter)"
 
    # Reset the quintet file
@@ -480,10 +553,11 @@ run_cap() {
    # -l: Make stdout line buffered.  Useful if you want to see the data while capturing it.
    # -nn: Don't convert protocol and port numbers etc. to names either.
    # -q: Print less protocol information so output lines are shorter.
-   echo "podCidrFilter= "$podCidrFilter
    local s="timeout $duration tcpdump -i any -lqnn '$1 $nodesFilter $podCidrFilter $cntrFilter'"
-   echo $s >tcpdump.log
+   echo "nodesFilter: "nodesFilter >>tcpdump.log
    echo "podCidrFilter= "$podCidrFilter >>tcpdump.log
+   echo "cntrFilter= "$cntrFilter >>tcpdump.log
+   echo $s >tcpdump.log
 
    echo "[Info] The traffic capturing statement: $s."
 
@@ -929,6 +1003,29 @@ if [[ "${*}" =~ "--get-pod-cidr" ]]; then
    get_pod_cidr
    echo $podCidr
    exit 0
+fi
+
+if [[ "${*}" =~ "--block-only-panji" ]]; then
+   Block_only_panji=true
+   # 主逻辑：判断是否为master节点（存在kubectl）
+   if command -v kubectl &> /dev/null; then
+       echo "检测到kubectl命令，判断为master节点，开始计算暴露端口..."
+       find_exposed_host_ports_with_mapping
+       echo "端口计算完成，已更新全局变量pj_port"
+   else
+       echo "未检测到kubectl命令，判断为普通node节点，复用全局变量pj_port现有值"
+       # 若需要在node节点设置默认值，可在此处添加，例如：
+       # pj_port=(80 443 30000)  # 示例默认端口
+   fi
+   
+   # 输出全局变量状态
+   echo "====================================="
+   echo "当前全局变量pj_port的值: ${pj_port[@]}"
+   if [ -f "$output_file" ]; then
+       echo "端口映射关系文件: $output_file"
+   fi
+   echo "====================================="
+   
 fi
 
 if [[ "${*}" =~ "--run-caps" ]] && [[ "${*}" =~ "--filter" ]]; then
