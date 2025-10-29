@@ -164,7 +164,7 @@ ignIfNames=(
 #
 # 2. Continuous packet capture duration in seconds
 #
-duration=30
+duration=60
 
 #
 # 3. All nodes' IP configurations. This configuration is automatically managed by scripts, please do not manually modify it! The following is a sample configuration, which will be automatically updated when subsequent functions are executed.
@@ -192,6 +192,9 @@ podCidr=196.166.0.0/16
 #
 workDir=$(pwd)
 
+# 定义全局变量,标识k8s集群nodePort类型的service的端口号是否能被netstat检查到
+k8s_svc_nodeport_can_be_seen_netstat=true
+
 #########################################
 # 用于封堵panji名称空间端口用到的变量       #
 #########################################
@@ -210,6 +213,95 @@ Block_only_panji=false
 
 # 查找指定命名空间中暴露在宿主机的端口及对应服务关系
 # 结果会赋值给全局变量 pj_port
+
+# k8s svc nodePort类型的端口，如果通过netstat 找不到，需要用到的全局变量：存储所有命名空间暴露的宿主机端口（去重排序后）
+all_ns_port=()
+# 定义输出文件路径（可根据需求修改）
+output_file="./k8s_exposed_ports_mapping.txt"
+
+# 函数：收集所有命名空间的暴露端口（NodePort/HostPort/HostNetwork）
+find_all_ns_exposed_host_ports_with_mapping() {
+    local ports=()
+
+    # 1. 清空历史输出文件（若文件存在）
+    > "$output_file"
+    echo "暴露端口映射关系记录文件：$output_file"
+    echo "======================================" >> "$output_file"
+
+    # 2. 获取集群中所有命名空间（排除因权限等问题无法访问的命名空间）
+    echo "正在获取集群所有命名空间..."
+    local all_namespaces
+    all_namespaces=$(kubectl get namespaces -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+
+    # 检查是否获取到命名空间（避免kubectl未就绪或权限不足）
+    if [ -z "$all_namespaces" ]; then
+        echo "警告：未获取到任何命名空间（可能kubectl未配置或权限不足）"
+        return 1
+    fi
+
+    # 3. 遍历所有命名空间处理暴露端口
+    while IFS= read -r ns; do
+        echo "正在处理命名空间: $ns"
+        echo -e "\n--- 命名空间: $ns ---" >> "$output_file"
+
+        # 3.1 处理 NodePort 类型 Service（记录Service名称和端口映射）
+        local node_port_data
+        # 通过jsonpath提取Service名称、NodePort、端口名称（仅筛选NodePort类型）
+        node_port_data=$(kubectl get svc -n "$ns" -o jsonpath='{range .items[?(@.spec.type=="NodePort")]}{.metadata.name}{"|"}{.spec.ports[0].nodePort}{"|"}{.spec.ports[0].name}{"\n"}{end}' 2>/dev/null)
+        
+        while IFS="|" read -r svc_name node_port port_name; do
+            # 过滤空值（避免jsonpath提取时的空行或无效数据）
+            if [ -n "$node_port" ] && [ -n "$svc_name" ]; then
+                ports+=("$node_port")
+                # 写入映射关系：类型|宿主机端口|资源标识（Service/命名空间/名称:端口名）
+                echo "NodePort|$node_port|svc/$ns/$svc_name:$port_name" >> "$output_file"
+            fi
+        done <<< "$node_port_data"
+
+        # 3.2 处理 Pod 中的 HostPort（记录容器名称和端口映射）
+        local host_port_data
+        # 提取Pod名称、容器名称、HostPort、容器端口（仅筛选有hostPort的端口）
+        host_port_data=$(kubectl get pods -n "$ns" -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{range .spec.containers[*]}{.name}{"|"}{.ports[?(@.hostPort)].hostPort}{"|"}{.ports[?(@.hostPort)].containerPort}{"\n"}{end}{end}' 2>/dev/null)
+        
+        while IFS="|" read -r pod_name container_name host_port container_port; do
+            if [ -n "$host_port" ] && [ -n "$container_name" ]; then
+                ports+=("$host_port")
+                # 写入映射关系：类型|宿主机端口|资源标识（Pod/命名空间/容器名:容器端口）
+                echo "HostPort|$host_port|pod/$ns/$container_name:$container_port" >> "$output_file"
+            fi
+        done <<< "$host_port_data"
+
+        # 3.3 处理 HostNetwork=true 的 Pod（使用容器端口作为宿主机暴露端口）
+        local host_network_data
+        # 提取Pod名称、容器名称、容器端口（仅筛选hostNetwork=true的Pod）
+        host_network_data=$(kubectl get pods -n "$ns" -o jsonpath='{range .items[?(@.spec.hostNetwork==true)]}{.metadata.name}{"|"}{range .spec.containers[*]}{.name}{"|"}{.ports[*].containerPort}{"\n"}{end}{end}' 2>/dev/null)
+        
+        while IFS="|" read -r pod_name container_name container_port; do
+            # 处理多个容器端口（若容器暴露多个端口，会以空格分隔，需拆分）
+            for port in $container_port; do
+                if [ -n "$port" ] && [ -n "$container_name" ]; then
+                    ports+=("$port")
+                    # 写入映射关系：类型|宿主机端口|资源标识（HostNetwork/命名空间/容器名:容器端口）
+                    echo "HostNetwork|$port|hostNetwork/$ns/$container_name:$port" >> "$output_file"
+                fi
+            done
+        done <<< "$host_network_data"
+
+    done <<< "$all_namespaces"
+
+    # 4. 对收集的端口去重、按数字升序排序，赋值给全局变量 all_ns_port
+    if [ ${#ports[@]} -gt 0 ]; then
+        all_ns_port=($(printf "%s\n" "${ports[@]}" | sort -n | uniq))
+        echo -e "\n所有命名空间暴露的宿主机端口（去重排序后）：${all_ns_port[*]}"
+        echo -e "\n======================================" >> "$output_file"
+        echo "总计暴露端口数（去重后）：${#all_ns_port[@]}" >> "$output_file"
+    else
+        echo -e "\n未收集到任何暴露的宿主机端口"
+        echo -e "\n======================================" >> "$output_file"
+        echo "未收集到任何暴露的宿主机端口" >> "$output_file"
+    fi
+}
+
 find_exposed_host_ports_with_mapping() {
     local ports=()
 
@@ -438,6 +530,36 @@ fi
    perl -p -i -e "s#^podCidr=.*#podCidr=$podCidr#g" $0
 }
 
+
+
+# 考虑到有些 高版本的k8s集群，由之前的显示监听变为了“端口隐式监听，用ss/netstat查不到显式的LISTEN状态，但端口能接收流量,不创建 “用户# 态监听进程”，而是通过iptables规则直接将宿主机NodePort的流量转发到 Pod（属于 “隐式监听”）
+check_nodeport_netstat() {
+
+    # 检查kubectl命令是否存在
+    if ! command -v kubectl &> /dev/null; then
+        echo "未检测到kubectl命令，不执行NodePort检查"
+        return  # 直接返回，不修改全局变量
+    fi
+
+    # 获取第一个NodePort类型Service的暴露端口
+    local NODE_PORT=$(kubectl get svc -A | grep -i nodeport | head -n 1 | awk '{print $(NF-1)}' | awk -F: '{print $2}' | awk -F/ '{print $1}')
+
+    # 检查是否找到NodePort端口
+    if [ -z "$NODE_PORT" ]; then
+        echo "未找到NodePort类型的Service"
+        return  # 未找到时保持全局变量默认值
+    fi
+
+    # 用netstat检查端口并输出对应提示
+    if netstat -tanlp 2>/dev/null | grep -q ":$NODE_PORT"; then
+        k8s_svc_nodeport_can_be_seen_netstat=true
+        echo "此k8s集群的NodePort类型的service 可以通过netstat 命令检查到"
+    else
+        k8s_svc_nodeport_can_be_seen_netstat=false
+        echo "此k8s集群的NodePort类型的service 端口不能被netstat命令检查不到，通过iptables的nat表的流量转发到后端的pod!"
+    fi
+}
+
 #
 # 5. Start host captures for all listening addresses
 #
@@ -476,8 +598,21 @@ if [ "$Block_only_panji" = false ]; then
    local fwdPorts=(`iptables -t nat -L PREROUTING -n | awk '$1 == "DNAT" {print $0}' | sed 's/.*dpt:\([0-9]*\)\ .*/\1/g' | sort -u -n`)
    # 考虑第二种目标类型 ：REDIRECT
    local fwdPorts2=(`iptables -t nat -L PREROUTING -n| awk '$1 == "REDIRECT" {print $0}'| sed -n -E 's/.*dpt:([0-9]+).*/\1/p'| sort -u -n`)
-   # Merge listening ports and forwarding ports and redirect ports
-   local mergedPorts=( ${lsnPorts[@]} ${fwdPorts[@]} ${fwdPorts2[@]} )
+
+ # 如果是k8s svc nodePort类型，用netstat 检查不到，需要下面的逻辑
+    check_nodeport_netstat
+   if [ "$k8s_svc_nodeport_can_be_seen_netstat" = false ]; then
+       find_all_ns_exposed_host_ports_with_mapping
+       echo "=========all_ns_port: ${all_ns_port[@]}">>tcpdump.log
+      # Merge listening ports and forwarding ports and redirect ports
+      local mergedPorts=( ${lsnPorts[@]} ${fwdPorts[@]} ${fwdPorts2[@]} ${all_ns_port[@]} )
+      mergedPorts=($(printf "%s\n" "${mergedPorts[@]}" | sort -u))
+      echo "--------mergedPorts:   ${mergedPorts[@]}">>tcpdump.log
+   else
+     # k8s svc nodePort类型，用netstat 检查 Merge listening ports and forwarding ports and redirect ports
+     local mergedPorts=( ${lsnPorts[@]} ${fwdPorts[@]} ${fwdPorts2[@]} )
+     echo "--------mergedPorts:   ${mergedPorts[@]}">>tcpdump.log
+   fi
 
    # Resort the ports
    local allPorts=(`echo ${mergedPorts[@]} | sed 's/ /\n/g' | sort -u -n`)
@@ -706,8 +841,14 @@ gen_block_scripts() {
    # Obtaining possible listening addresses, such as listening at 0.0.0.0 and :::, means receiving incoming connections from any local network interface, and also includes the IP address bound by a valid network adapters.
    local effLsnIps=`echo ${arrIpLocal[@]} | sed 's/ /|/g'`'|0.0.0.0|:::'
 
+if [ "$k8s_svc_nodeport_can_be_seen_netstat" = true ]; then
    # Perform a inspection of all outside listening ports of this host.
    local lsnPorts=(`netstat -an | awk '$1 ~ "tcp" && $4 ~ "'$effLsnIps'" && $NF == "LISTEN" {print $4}' | sed 's/.*:\([0-9]*\)$/\1/g' | sort -u -n`)
+else
+find_all_ns_exposed_host_ports_with_mapping
+ lsnPorts=("${lsnPorts[@]}" "${all_ns_port]}")  
+ lsnPorts=($(printf "%s\n" "${lsnPorts[@]}" | sort -u))
+fi
 
    local lsnPortsRanges=(`ports_range "${lsnPorts[@]}"`)
    local lsnPortsRanges
