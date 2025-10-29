@@ -526,11 +526,14 @@ run_cap() {
    local nodesFilter=
 
    # Compress the node list into a subnet list
+   echo "nodes: ====================== ${nodes[@]}">>tcpdump.log
+   # eg:192.168.80.11-15，192.168.80.11/32 , 192.168.80.12/30(192.168.80.12-15)包含主机2为全为0的网络号和主机位全1的广播IP
    local arrSubnets=(`python2 iprange.py --to-subnets ${nodes[@]}`)
+   echo "arrSubnets: ---------------------------${arrSubnets[@]}" >>tcpdump.log
    if [ ${#arrSubnets[@]} -ne 0 ]; then
       nodesFilter=$(echo ${arrSubnets[@]} | sed 's/ /\n/g' | sed 's/^/and not src net /g' | tr '\n' ' ' | sed 's/[[:space:]]*$//')
    fi
-   echo "[Info] The filter of cluster nodes: $nodesFilter."
+   echo "[Info] The filter of cluster nodes: $nodesFilter." >> tcpdump.log
 
    # 2. Obtain the K8s pod CIDR filter
    local podCidrFilter=
@@ -554,10 +557,10 @@ run_cap() {
    # -nn: Don't convert protocol and port numbers etc. to names either.
    # -q: Print less protocol information so output lines are shorter.
    local s="timeout $duration tcpdump -i any -lqnn '$1 $nodesFilter $podCidrFilter $cntrFilter'"
-   echo "nodesFilter: "nodesFilter >>tcpdump.log
+   echo "nodesFilter: "$nodesFilter >>tcpdump.log
    echo "podCidrFilter= "$podCidrFilter >>tcpdump.log
    echo "cntrFilter= "$cntrFilter >>tcpdump.log
-   echo $s >tcpdump.log
+   echo $s >>tcpdump.log
 
    echo "[Info] The traffic capturing statement: $s."
 
