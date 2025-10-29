@@ -556,6 +556,8 @@ check_nodeport_netstat() {
         echo "此k8s集群的NodePort类型的service 可以通过netstat 命令检查到"
     else
         k8s_svc_nodeport_can_be_seen_netstat=false
+	# k8s NodePort类型的service 端口不能被netstat检查到，要调用下面的方法汇聚所有ns暴露的端口，填充到全局变量all_ns_port数组
+	find_all_ns_exposed_host_ports_with_mapping
         echo "此k8s集群的NodePort类型的service 端口不能被netstat命令检查不到，通过iptables的nat表的流量转发到后端的pod!"
     fi
 }
@@ -599,11 +601,11 @@ if [ "$Block_only_panji" = false ]; then
    # 考虑第二种目标类型 ：REDIRECT
    local fwdPorts2=(`iptables -t nat -L PREROUTING -n| awk '$1 == "REDIRECT" {print $0}'| sed -n -E 's/.*dpt:([0-9]+).*/\1/p'| sort -u -n`)
 
- # 如果是k8s svc nodePort类型，用netstat 检查不到，需要下面的逻辑
-    check_nodeport_netstat
+# 调用检查k8s集群 类型为NodePort类型的svc 暴露的端口能否被netstat检查到的函数,如果检查不到，把全局变量k8s_svc_nodeport_can_be_see
+# n_netstat赋值为false,并在这个函数里面调用find_all_ns_exposed_host_ports_with_mapping()，搜集k8s 集群内所有名称空间暴露的端口装配成# 数组赋值给全局变量all_ns_port
+   check_nodeport_netstat
+ # 如果是k8s svc nodePort类型，用netstat 检查不到，
    if [ "$k8s_svc_nodeport_can_be_seen_netstat" = false ]; then
-       find_all_ns_exposed_host_ports_with_mapping
-       echo "=========all_ns_port: ${all_ns_port[@]}">>tcpdump.log
       # Merge listening ports and forwarding ports and redirect ports
       local mergedPorts=( ${lsnPorts[@]} ${fwdPorts[@]} ${fwdPorts2[@]} ${all_ns_port[@]} )
       mergedPorts=($(printf "%s\n" "${mergedPorts[@]}" | sort -u))
@@ -841,13 +843,15 @@ gen_block_scripts() {
    # Obtaining possible listening addresses, such as listening at 0.0.0.0 and :::, means receiving incoming connections from any local network interface, and also includes the IP address bound by a valid network adapters.
    local effLsnIps=`echo ${arrIpLocal[@]} | sed 's/ /|/g'`'|0.0.0.0|:::'
 
-if [ "$k8s_svc_nodeport_can_be_seen_netstat" = true ]; then
    # Perform a inspection of all outside listening ports of this host.
    local lsnPorts=(`netstat -an | awk '$1 ~ "tcp" && $4 ~ "'$effLsnIps'" && $NF == "LISTEN" {print $4}' | sed 's/.*:\([0-9]*\)$/\1/g' | sort -u -n`)
-else
-find_all_ns_exposed_host_ports_with_mapping
- lsnPorts=("${lsnPorts[@]}" "${all_ns_port]}")  
- lsnPorts=($(printf "%s\n" "${lsnPorts[@]}" | sort -u))
+if [ "$k8s_svc_nodeport_can_be_seen_netstat" = false ]; then
+echo "before=================== lsnPorts: ${lsnPorts[@]}">>tcpdump.log
+echo "before=================== all_ns_port: ${all_ns_port[@]}">>tcpdump.log
+ lsnPorts=("${lsnPorts[@]}" "${all_ns_port[@]}")  
+ lsnPorts=($(printf "%s\n" "${lsnPorts[@]}" | sort -u -n))
+echo "after=================== lsnPorts: ${lsnPorts[@]}">>tcpdump.log
+echo "after=================== all_ns_port: ${all_ns_port[@]}">>tcpdump.log
 fi
 
    local lsnPortsRanges=(`ports_range "${lsnPorts[@]}"`)
@@ -1122,6 +1126,9 @@ if [[ "${*}" =~ "--duration" ]]; then
 
    perl -p -i -e "s/^duration=.*/duration=$duration/g" $0
 fi
+
+
+check_nodeport_netstat
 
 if [[ "${*}" =~ "--get-nodes" ]]; then
    get_nodes
