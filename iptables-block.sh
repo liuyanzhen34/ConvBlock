@@ -206,7 +206,7 @@ pj_port=()
 namespaces=("chaosblade" "default" "istio-system" "kube-node-lease" "kube-public" "kube-system" "monitor-ns" "nfs-provisioner-ns" "paas-admin" "paas-ec" "paas-middleware" "paas-monitor" "paas-public")
 
 # 输出文件路径
-output_file="pj-port-svc-mapper.txt"
+pj_output_file="pj-port-svc-mapper.txt"
 
 # 定义布尔变量，初始值为假,如果传入的参数指明只封堵磐基名称空间的端口，这个变量就为true
 Block_only_panji=false
@@ -306,9 +306,9 @@ find_exposed_host_ports_with_mapping() {
     local ports=()
 
     # 清空历史文件
-    > "$output_file"
+    > "$pj_output_file"
 
-    # 遍历所有命名空间
+    # 遍历panji使用的命名空间
     for ns in "${namespaces[@]}"; do
         echo "正在处理命名空间: $ns"
         
@@ -318,7 +318,7 @@ find_exposed_host_ports_with_mapping() {
         while IFS="|" read -r svc_name node_port port_name; do
             if [ -n "$node_port" ] && [ -n "$svc_name" ]; then
                 ports+=("$node_port")
-                echo "NodePort|$node_port|svc/$ns/$svc_name:$port_name" >> "$output_file"
+                echo "NodePort|$node_port|svc/$ns/$svc_name:$port_name" >> "$pj_output_file"
             fi
         done <<< "$node_port_data"
 
@@ -328,7 +328,7 @@ find_exposed_host_ports_with_mapping() {
         while IFS="|" read -r pod_name container_name host_port container_port; do
             if [ -n "$host_port" ] && [ -n "$container_name" ]; then
                 ports+=("$host_port")
-                echo "HostPort|$host_port|pod/$ns/$container_name:$container_port" >> "$output_file"
+                echo "HostPort|$host_port|pod/$ns/$container_name:$container_port" >> "$pj_output_file"
             fi
         done <<< "$host_port_data"
 
@@ -338,7 +338,7 @@ find_exposed_host_ports_with_mapping() {
         while IFS="|" read -r pod_name container_name container_port; do
             if [ -n "$container_port" ] && [ -n "$container_name" ]; then
                 ports+=("$container_port")
-                echo "HostNetwork|$container_port|hostNetwork/$ns/$container_name:$container_port" >> "$output_file"
+                echo "HostNetwork|$container_port|hostNetwork/$ns/$container_name:$container_port" >> "$pj_output_file"
             fi
         done <<< "$host_network_data"
     done
@@ -589,7 +589,8 @@ run_host_caps() {
 
    
 # 判断变量值
-if [ "$Block_only_panji" = false ]; then
+if [ "${Block_only_panji}" = false ]; then
+	echo "----------------- Block_only_panji: ${Block_only_panji}">>tcpdump.log
    # Obtaining possible listening addresses, such as listening at 0.0.0.0 and :::, means receiving incoming connections from any local network interface, and also includes the IP address bound by a valid network adapters.
    local effLsnIps=`echo ${arrIpLocal[@]} | sed 's/ /|/g'`'|0.0.0.0|:::'
 
@@ -862,6 +863,12 @@ fi
    # Fix the issue where the multiport module in iptables supports a maximum of 15 ports.
    # This  module  matches  a  set of source or destination ports.  Up to 15 ports can be specified.  A port range (port:port)
    # counts as two ports.
+# 如果执行该脚本传入了--block-only-panji,就只封堵panji名称空间暴露的port
+if [ "${Block_only_panji}" = "true" ]; then
+	echo "Block_only_panji : ${Block_only_panji}}" >>tcpdump.log
+   local sLsnPorts=`echo ${pj_port[@]} | sed 's/ /,/g'`
+   echo "=== block only panj,sLsnPorts is ${sLsnPorts[@]}">>tcpdump.log
+fi
    IFS=',' read -ra P <<< "$sLsnPorts"
    count=0
    chunk=""
@@ -1172,8 +1179,8 @@ if [[ "${*}" =~ "--block-only-panji" ]]; then
    # 输出全局变量状态
    echo "====================================="
    echo "当前全局变量pj_port的值: ${pj_port[@]}"
-   if [ -f "$output_file" ]; then
-       echo "端口映射关系文件: $output_file"
+   if [ -f "$pj_output_file" ]; then
+       echo "端口映射关系文件: $pj_output_file"
    fi
    echo "====================================="
    
