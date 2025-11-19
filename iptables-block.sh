@@ -291,9 +291,23 @@ find_all_ns_exposed_host_ports_with_mapping() {
 
     # 4. 对收集的端口去重、按数字升序排序，赋值给全局变量 all_ns_port
     if [ ${#ports[@]} -gt 0 ]; then
-        all_ns_port=($(printf "%s\n" "${ports[@]}" | sort -n | uniq))
+       echo "端口数组的元素（逐行输出）："
+       # 方式1：for in 遍历数组（推荐，兼容性好）
+       for port in "${ports[@]}"; do
+           echo "$port"
+       done
+       
+       echo "---------------------------" 
+       all_ns_port=($(printf "%s\n" "${ports[@]}" | sort -n | uniq))	
+       for port in "${all_ns_port[@]}"; do
+           echo "$port"
+       done
+
+        all_ns_port=($(printf "%s\n" "${all_ns_port[@]}" | sort -n | uniq))
+	echo "all_ns_port=(${all_ns_port[@]})">./k8s-info.txt
         echo -e "\n所有命名空间暴露的宿主机端口（去重排序后）：${all_ns_port[*]}"
         echo -e "\n======================================" >> "$output_file"
+        echo -e "\n所有命名空间暴露的宿主机端口（去重排序后）：${all_ns_port[*]}">>"$output_file"
         echo "总计暴露端口数（去重后）：${#all_ns_port[@]}" >> "$output_file"
     else
         echo -e "\n未收集到任何暴露的宿主机端口"
