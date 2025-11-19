@@ -663,6 +663,21 @@ run_cap() {
    # 1. Obtain the K8s nodes filter
    local nodesFilter=
 
+   # Obtain all IPs of all interfaces
+   local ipArr=(`ip a | grep inet | grep -E -o '([0-9a-fA-F:]+)/[0-9]{1,3}|([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' | awk -F'/' '{print $1}' | grep -vE '127.0.0.1|::1' | sort | uniq`)
+echo "ipArr is: ${ipArr[*]}">>b.txt
+echo "nodes is: ${nodes[*]}">>b.txt
+   if [ ${#ipArr[@]} -eq 0 ]; then
+      echo '[Warn] Cannot obtain the IPs of all interfaces!'
+      exit 1
+   fi
+
+   # Solving the intersection of K8s cluster node IP and current node interface IP
+   local intersect=(`echo ${nodes[*]} ${ipArr[*]} | sed 's/ /\n/g' | sort | uniq -c | awk '$1!=1{print $2}'`)
+
+
+  
+
    # Compress the node list into a subnet list
    echo "nodes: ====================== ${nodes[@]}">>tcpdump.log
    # eg:192.168.80.11-15，192.168.80.11/32 , 192.168.80.12/30(192.168.80.12-15)包含主机2为全为0的网络号和主机位全1的广播IP
@@ -818,6 +833,13 @@ gen_block_scripts() {
    echo | tee -a block.sh
    echo '#!/bin/bash' | tee -a block.sh
 
+   echo | tee -a block.sh
+   echo '##################################' | tee -a block.sh
+   echo '# Policies for Local Loopback Address #' | tee -a block.sh
+   echo '##################################' | tee -a block.sh
+   echo | tee -a block.sh
+   echo "iptables -t raw -I PREROUTING -p tcp -s 127.0.0.0/8 -j ACCEPT # local loopback address policies"|tee -a block.sh
+   
    add_k8s_nodes_plcs
 
    add_k8s_pods_plcs
