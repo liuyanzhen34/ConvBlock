@@ -730,10 +730,13 @@ echo "nodes is: ${nodes[*]}">>b.txt
    echo $s >>tcpdump.log
 
    echo "[Info] The traffic capturing statement: $s."
-
+   echo $s >>cmd.txt
    eval $s 2>/dev/null | while IFS= read -r line; do
+        echo $line >>line.txt
       local plc=`echo $line | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}\.[0-9]{1,5} > ([0-9]{1,3}\.){3}[0-9]{1,3}\.[0-9]{1,5}' | sed 's/\.[0-9]* > /,/g'`
-      if [ `grep $plc quintet.txt | wc -l` -eq 0 ]; then
+      echo $plc >>plc.txt
+      # 增加参数-Fx避免部分内容匹配，如192.168.80.100,192.168.80.11.22365，没有192.168.80.100,192.168.80.11.22 也可以匹配上的问题
+      if [ `grep -Fx $plc quintet.txt | wc -l` -eq 0 ]; then
          echo $plc >> quintet.txt
       fi
    done
