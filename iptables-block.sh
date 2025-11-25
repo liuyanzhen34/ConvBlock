@@ -200,7 +200,7 @@ k8s_svc_nodeport_can_be_seen_netstat=true
 #########################################
 
 # 全局变量：存储暴露的端口数组
-pj_port=()
+pj_port=(53 5473 6666 9153 9999 22365)
 
 # 预先定义需要查询的命名空间,如果磐基名称空间有变化，可以手动修改维护这个名称空间数组
 namespaces=("chaosblade" "default" "istio-system" "kube-node-lease" "kube-public" "kube-system" "monitor-ns" "nfs-provisioner-ns" "paas-admin" "paas-ec" "paas-middleware" "paas-monitor" "paas-public")
@@ -215,7 +215,7 @@ Block_only_panji=false
 # 结果会赋值给全局变量 pj_port
 
 # k8s svc nodePort类型的端口，如果通过netstat 找不到，需要用到的全局变量：存储所有命名空间暴露的宿主机端口（去重排序后）
-all_ns_port=()
+all_ns_port=(53 5473 6666 9153 22365)
 # 定义输出文件路径（可根据需求修改）
 output_file="./k8s_exposed_ports_mapping.txt"
 
@@ -304,7 +304,6 @@ find_all_ns_exposed_host_ports_with_mapping() {
        done
 
         all_ns_port=($(printf "%s\n" "${all_ns_port[@]}" | sort -n | uniq))
-	echo "all_ns_port=(${all_ns_port[@]})">./k8s-info.txt
         echo -e "\n所有命名空间暴露的宿主机端口（去重排序后）：${all_ns_port[*]}"
         echo -e "\n======================================" >> "$output_file"
         echo -e "\n所有命名空间暴露的宿主机端口（去重排序后）：${all_ns_port[*]}">>"$output_file"
@@ -314,6 +313,10 @@ find_all_ns_exposed_host_ports_with_mapping() {
         echo -e "\n======================================" >> "$output_file"
         echo "未收集到任何暴露的宿主机端口" >> "$output_file"
     fi
+    
+        echo "all_ns_port is "$all_ns_port >>tcpdump.log
+	perl -p -i -e "s#^all_ns_port=.*#all_ns_port=(${all_ns_port[*]})#g" $0
+
 }
 
 find_exposed_host_ports_with_mapping() {
@@ -359,6 +362,9 @@ find_exposed_host_ports_with_mapping() {
 
     # 对端口去重并排序，赋值给全局变量
     pj_port=($(printf "%s\n" "${ports[@]}" | sort -n | uniq))
+    # 将数组元素通过换行符分隔，排序后去重，再转回数组
+    pj_port=($(printf "%s\n" "${pj_port[@]}" | sort -n | uniq))
+    perl -p -i -e "s#^pj_port=.*#pj_port=(${pj_port[*]})#g" $0
 }
 #########################################
 # Common Routines / Functions area      #
@@ -679,8 +685,6 @@ run_cap() {
 
    # Obtain all IPs of all interfaces
    local ipArr=(`ip a | grep inet | grep -E -o '([0-9a-fA-F:]+)/[0-9]{1,3}|([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' | awk -F'/' '{print $1}' | grep -vE '127.0.0.1|::1' | sort | uniq`)
-echo "ipArr is: ${ipArr[*]}">>b.txt
-echo "nodes is: ${nodes[*]}">>b.txt
    if [ ${#ipArr[@]} -eq 0 ]; then
       echo '[Warn] Cannot obtain the IPs of all interfaces!'
       exit 1
@@ -730,11 +734,8 @@ echo "nodes is: ${nodes[*]}">>b.txt
    echo $s >>tcpdump.log
 
    echo "[Info] The traffic capturing statement: $s."
-   echo $s >>cmd.txt
    eval $s 2>/dev/null | while IFS= read -r line; do
-        echo $line >>line.txt
       local plc=`echo $line | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}\.[0-9]{1,5} > ([0-9]{1,3}\.){3}[0-9]{1,3}\.[0-9]{1,5}' | sed 's/\.[0-9]* > /,/g'`
-      echo $plc >>plc.txt
       # 增加参数-Fx避免部分内容匹配，如192.168.80.100,192.168.80.11.22365，没有192.168.80.100,192.168.80.11.22 也可以匹配上的问题
       if [ `grep -Fx $plc quintet.txt | wc -l` -eq 0 ]; then
          echo $plc >> quintet.txt
@@ -836,6 +837,10 @@ add_cntr_plcs() {
 #
 gen_block_scripts() {
 
+   # 因为生成的封堵脚本会用到变量all_ns_port，因此需要调用这个函数,这个函数里面调用find_all_ns_exposed_host_ports_with_mapping，搜集k8s 集群内所有名称空间暴露的端口装配成数组赋值给全局变量all_ns_port
+   check_nodeport_netstat
+
+	
    if [ ! -f quintet.txt ]; then
       echo '[Warn] The IP quintuple file has not yet been created!'
       return
@@ -889,13 +894,13 @@ if [ "$k8s_svc_nodeport_can_be_seen_netstat" = false ]; then
 echo "before=================== lsnPorts: ${lsnPorts[@]}">>tcpdump.log
 echo "before=================== all_ns_port: ${all_ns_port[@]}">>tcpdump.log
  lsnPorts=("${lsnPorts[@]}" "${all_ns_port[@]}")  
+ echo "wo@@@@@@=====lsnPorts: ${lsnPorts[@]}">>tcpdump.log
  lsnPorts=($(printf "%s\n" "${lsnPorts[@]}" | sort -u -n))
 echo "after=================== lsnPorts: ${lsnPorts[@]}">>tcpdump.log
 echo "after=================== all_ns_port: ${all_ns_port[@]}">>tcpdump.log
 fi
 
    local lsnPortsRanges=(`ports_range "${lsnPorts[@]}"`)
-   local lsnPortsRanges
    # Adding multiple ports blocking policy
    local sLsnPorts=`echo ${lsnPortsRanges[@]} | sed 's/ /,/g'`
    # -A PREROUTING -p tcp -m multiport --dports 3312,4443,50101,51012,51021,61588,6443,80,8001,8008,8443,9091,9093 -j DROP
@@ -1174,7 +1179,8 @@ if [[ "${*}" =~ "--duration" ]]; then
 fi
 
 
-check_nodeport_netstat
+# 在抓包./iptables-block.sh --run-host-caps 和生成封堵脚本./iptables-block.sh --gen-block-scripts 都需要全局变量all_ns_port，因此需要把这个函数放到这个比较靠前的位置
+#check_nodeport_netstat
 
 if [[ "${*}" =~ "--get-nodes" ]]; then
    get_nodes
