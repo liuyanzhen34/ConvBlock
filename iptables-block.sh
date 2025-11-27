@@ -180,7 +180,7 @@ nodes=(
 #
 # 4. Current Node's IP. When a backup task is assigned to a node, the IP address of the node can be determined based on the intersection of the IP addresses of the K8s node and all network IP addresses of the current node.
 #
-currNodeIP=192.168.80.11
+currNodeIP=192.168.80.14
 
 #
 # 5. The CIDR of K8s pods
@@ -193,7 +193,7 @@ podCidr=196.166.0.0/16
 workDir=$(pwd)
 
 # 定义全局变量,标识k8s集群nodePort类型的service的端口号是否能被netstat检查到
-k8s_svc_nodeport_can_be_seen_netstat=true
+k8s_svc_nodeport_can_be_seen_netstat=false
 
 #########################################
 # 用于封堵panji名称空间端口用到的变量       #
@@ -320,6 +320,12 @@ find_all_ns_exposed_host_ports_with_mapping() {
 }
 
 find_exposed_host_ports_with_mapping() {
+    # 检查kubectl命令是否存在
+    if ! command -v kubectl &> /dev/null; then
+        echo "未检测到kubectl命令，直接返回，不修改全局变量"
+        return  # 直接返回，不修改全局变量
+    fi
+    
     local ports=()
 
     # 清空历史文件
@@ -580,6 +586,8 @@ check_nodeport_netstat() {
 	find_all_ns_exposed_host_ports_with_mapping
         echo "此k8s集群的NodePort类型的service 端口不能被netstat命令检查不到，通过iptables的nat表的流量转发到后端的pod!"
     fi
+
+    perl -p -i -e "s#^k8s_svc_nodeport_can_be_seen_netstat=.*#k8s_svc_nodeport_can_be_seen_netstat=${k8s_svc_nodeport_can_be_seen_netstat}#g" $0
 }
 
 #
